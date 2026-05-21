@@ -12,6 +12,8 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import seaborn as sns
+from sklearn.experimental import enable_halving_search_cv  # noqa: F401  # isort: skip - must precede HalvingGridSearchCV
+
 from sklearn.ensemble import HistGradientBoostingClassifier, RandomForestClassifier
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import (
@@ -35,6 +37,7 @@ from sklearn.svm import SVC
 # Configuration
 # ---------------------------------------------------------------------------
 DATA_PATH = Path("archive/legocolor-extended.csv")
+REF_COLORS_PATH = Path("archive/colors.csv")
 DELIMITER = ";"
 FEATURE_COLS = [
     "R",
@@ -406,6 +409,49 @@ def predict_two_stage(
     return predictions
 
 
+# ---------------------------------------------------------------------------
+# Nearest centroid classifier (reference-based, uses colors.csv)
+# ---------------------------------------------------------------------------
+
+
+def train_nearest_centroid(
+    X_train_rgb: np.ndarray,
+    df_ref_path: Path,
+    le: LabelEncoder,
+) -> KNeighborsClassifier:
+    """Build a 1-NN classifier using official LEGO reference RGBs as centroids.
+
+    Uses archive/colors.csv to get the reference (R, G, B) for each color,
+    scales them using the training RGB distribution, and wraps them as
+    a 1-NN model. This is a zero-training baseline: no pixel data needed.
+    """
+    df_ref = pd.read_csv(df_ref_path, delimiter=",")
+    ref_subset = df_ref[df_ref["name"].isin(le.classes_)].copy()
+
+    if len(ref_subset) != len(le.classes_):
+        missing = set(le.classes_) - set(ref_subset["name"])
+        raise ValueError(f"Missing reference colors: {missing}")
+
+    # Parse hex rgb to integers
+    def _hex_to_rgb(h: str) -> tuple[int, int, int]:
+        h = h.strip()
+        return int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
+
+    rgb_vals = np.array([_hex_to_rgb(h) for h in ref_subset["rgb"]], dtype=np.float64)
+
+    # Fit scaler on training RGB, transform centroids
+    scaler_rgb = StandardScaler()
+    scaler_rgb.fit(X_train_rgb)
+    centroids_scaled = scaler_rgb.transform(rgb_vals)
+
+    # Align order with le.classes_
+    centroid_labels = le.transform(ref_subset["name"].values)
+
+    model = KNeighborsClassifier(n_neighbors=1)
+    model.fit(centroids_scaled, centroid_labels)
+    return model
+
+
 def main() -> None:
     PLOT_DIR.mkdir(exist_ok=True)
 
@@ -466,6 +512,12 @@ def main() -> None:
     mlp = train_mlp(X_train_s, y_train_enc, train_groups)
     res_mlp = evaluate_model(mlp, "MLP", X_test_s, y_test_enc, le)
     results.append(res_mlp)
+
+    # --- Nearest Centroid (reference-based, uses colors.csv) ---
+    print("\nTraining Nearest Centroid (reference RGBs)...")
+    nc = train_nearest_centroid(X_train[:, :3], Path("archive/colors.csv"), le)
+    res_nc = evaluate_model(nc, "Nearest Centroid", X_test[:, :3], y_test_enc, le)
+    results.append(res_nc)
 
     # --- Two-stage MLP ---
     print("\nTraining Two-Stage MLP...")
@@ -600,6 +652,7 @@ def main() -> None:
         "HistGradientBoosting": hgb,
         "Logistic Regression": logreg,
         "MLP": mlp,
+        "Nearest Centroid": nc,
     }
     best_model = model_map.get(best["name"])
     if best_model is not None and hasattr(best_model, "feature_importances_"):
