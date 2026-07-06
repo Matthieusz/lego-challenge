@@ -8,3 +8,6 @@ wheels/
 
 # Virtual environments
 .venv
+
+# Generated training artifacts (binaries, plots, metrics)
+artifacts/
